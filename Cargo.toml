@@ -1,0 +1,9 @@
+[package]
+name = "ltnotify"
+version = "0.1.0"
+authors = ["Bart Noordervliet"]
+
+[dependencies]
+chan = "0.1"
+postgres = "0.14"
+fallible-iterator = "0.1"
