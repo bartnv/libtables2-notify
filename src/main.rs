@@ -1,4 +1,4 @@
-extern crate chan;
+extern crate bus;
 extern crate postgres;
 extern crate fallible_iterator;
 extern crate websocket;
@@ -6,11 +6,11 @@ extern crate openssl;
 
 use std::thread;
 use std::process::exit;
-use std::io::Write;
-use std::net::TcpListener;
+use std::sync::{Arc,Mutex};
+use bus::Bus;
 use fallible_iterator::FallibleIterator;
 use websocket::{Server, Message};
-use openssl::ssl::{SslMethod, SslAcceptorBuilder, SslStream};
+use openssl::ssl::{SslMethod, SslAcceptorBuilder};
 use openssl::x509;
 
 fn main() {
@@ -23,13 +23,14 @@ fn main() {
   let mut builder = SslAcceptorBuilder::mozilla_modern_raw(SslMethod::tls()).unwrap();
   {
     let context = builder.builder_mut();
-    context.set_private_key_file("/home/sargeth/privkey.pem", x509::X509_FILETYPE_PEM);
-    context.set_certificate_chain_file("/home/sargeth/fullchain.pem");
+    let _ = context.set_private_key_file("privkey.pem", x509::X509_FILETYPE_PEM);
+    let _ = context.set_certificate_chain_file("fullchain.pem");
   }
   let acceptor = builder.build();
 
   let server = Server::bind_secure("0.0.0.0:6185", acceptor).unwrap_or_else(|e| { println!("Failed to bind to listen address: {}", e.to_string()); exit(1); });
-  let (send, receive) = chan::async();
+  let bus = Arc::new(Mutex::new(Bus::new(10)));
+  let bus_server = bus.clone();
   let mut conncount = 0;
   thread::spawn(move || {
     for res in server {
@@ -38,7 +39,7 @@ fn main() {
         Ok(res) => {
           let mut stream = res.accept().unwrap();
           let addr = stream.peer_addr().unwrap();
-          let receiver = receive.clone();
+          let mut receiver = bus_server.lock().unwrap().add_rx();
           println!("New connection #{} from {}", conncount, addr);
           thread::spawn(move || {
             loop {
@@ -65,16 +66,19 @@ fn main() {
   let mut query = String::from("LISTEN ");
   query.push_str(&args[1]);
   conn.execute(&query, &[]).unwrap();
-  let notifications = conn.notifications();
-  let mut iter = notifications.blocking_iter();
+  let notif = conn.notifications();
+  let mut notifications = notif.blocking_iter();
   println!("Ready to receive notifications");
   loop {
-    let res = iter.next();
+    let res = notifications.next();
     match res {
       Ok(res) => {
-        let mut notif = res.unwrap();
+        let notif = res.unwrap();
         println!("{:?}", notif);
-        send.send(notif.payload);
+        match bus.lock().unwrap().try_broadcast(notif.payload) {
+            Ok(_) => {}
+            Err(_) => println!("try_broadcast failed")
+        }
       }
       Err(e) => println!("Error: {}", e.to_string())
     }
